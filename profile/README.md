@@ -1,5 +1,14 @@
-# rotini
+<h1 align="center">rotini</h1>
 
-Rotini is a spec-driven CLI package for Go, with a codegen tool and a runtime library. You declare your commands, flags and arguments in a spec file (YAML, JSON, JSONC or TOML). Rotini validates it and generates the typed Go, the command tree and a handler stub per command. You write each command's handler, and the runtime parses and validates input before calling it. The loop is: edit the spec, go generate, provide handler implementations, build.
+<p align="center"><strong>A spec-driven codegen package for building CLI programs in Go.</strong></p>
 
-For more information, see the [rotini](https://rotini.dev) documentation.
+<p align="center">
+  <a href="https://github.com/go-rotini/rotini/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/go-rotini/rotini?sort=semver&color=007d9c&labelColor=5c5c5c&style=flat-square"></a>
+  <a href="https://rotini.dev"><img alt="Documentation" src="https://img.shields.io/badge/docs-rotini.dev-007d9c?labelColor=5c5c5c&style=flat-square"></a>
+  <a href="https://pkg.go.dev/github.com/go-rotini/rotini"><img alt="Go Reference" src="https://img.shields.io/badge/-reference-007d9c?logo=go&logoColor=white&labelColor=5c5c5c&style=flat-square"></a>
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-007d9c?labelColor=5c5c5c&style=flat-square"></a>
+</p>
+
+<p align="center">
+  <img alt="A split terminal. On the left, a Go module is created, rotini is added and rotini init sets up a program that builds and runs. Then rotini generate --watch starts on the right while a command is added to the spec on the left, its handler is implemented and the program is built and run" src="https://github.com/go-rotini/rotini/blob/main/docs/static/rotini-loop.gif" width="800">
+</p>

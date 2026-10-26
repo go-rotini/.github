@@ -1,0 +1,163 @@
+# Keeps a go-rotini module's toolchain and development tools current, which Dependabot can't:
+# it doesn't move go.mod's toolchain line, and it doesn't read tools.mod.
+#
+# The toolchain line moves to the newest patch of its Go release, and make tools-upgrade moves
+# every tool in tools.mod to its latest release. When anything changed, make lint runs with the
+# new tools and toolchain; if it passes, the change is committed straight to main as
+# build(tools), which cuts no release. If lint fails, the attempt is pushed to the tools-upgrade
+# branch and an issue says what to fix; main is left alone.
+#
+# The commit is pushed as rotinibot, a GitHub App the main branch's ruleset lets
+# through: its client ID is the ROTINIBOT_CLIENT_ID organization variable and its private
+# key the ROTINIBOT_PRIVATE_KEY organization secret, which the caller passes with
+# `secrets: inherit`. Its push starts CI on main as a person's would.
+name: Go tools upgrade
+
+on:
+  workflow_call:
+    inputs:
+      check:
+        description: The bash script that must pass before the upgrade is committed.
+        type: string
+        default: make lint
+      go-version:
+        description: The Go release for setup-go, such as 1.27.x. Empty reads go-version-file.
+        type: string
+        default: ""
+      go-version-file:
+        description: The file setup-go reads the Go release from when go-version is empty.
+        type: string
+        default: go.mod
+    secrets:
+      ROTINIBOT_PRIVATE_KEY:
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CHECK: ${{ inputs.check }}
+      ISSUE_TITLE: The weekly tools upgrade needs attention
+    steps:
+      - name: Check rotinibot is set up
+        env:
+          CLIENT_ID: ${{ vars.ROTINIBOT_CLIENT_ID }}
+        run: |
+          if [ -z "$CLIENT_ID" ]; then
+            echo "::error::set the ROTINIBOT_CLIENT_ID organization variable to rotinibot's client ID"
+            exit 1
+          fi
+
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: token
+        with:
+          client-id: ${{ vars.ROTINIBOT_CLIENT_ID }}
+          private-key: ${{ secrets.ROTINIBOT_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ steps.token.outputs.token }}
+
+      - name: Commit as rotinibot
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          BOT: ${{ steps.token.outputs.app-slug }}[bot]
+        run: |
+          id=$(gh api "users/$BOT" --jq .id)
+          git config user.name "$BOT"
+          git config user.email "$id+$BOT@users.noreply.github.com"
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ inputs.go-version }}
+          go-version-file: ${{ inputs.go-version == '' && inputs.go-version-file || '' }}
+          check-latest: ${{ inputs.go-version != '' }}
+          cache-dependency-path: |
+            go.sum
+            tools.sum
+
+      - name: Move the toolchain line to the newest patch release
+        id: toolchain
+        run: |
+          current=$(awk '/^toolchain /{print $2}' go.mod)
+          if [ -z "$current" ]; then
+            echo "go.mod has no toolchain line; leaving it"
+            exit 0
+          fi
+          minor=$(printf '%s' "$current" | sed -E 's/^(go[0-9]+\.[0-9]+).*/\1/')
+          latest=$(curl -fsSL 'https://go.dev/dl/?mode=json&include=all' |
+            jq -r --arg m "$minor." '[.[] | select(.stable) | .version | select(startswith($m))][0] // empty')
+          if [ -z "$latest" ]; then
+            echo "::error::found no stable release of $minor on go.dev"
+            exit 1
+          fi
+          if [ "$latest" != "$current" ]; then
+            go get "toolchain@$latest"
+            echo "toolchain $current -> $latest"
+            echo "change=toolchain $current -> $latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upgrade the tools in tools.mod
+        run: make tools-upgrade
+
+      - name: See what changed
+        id: diff
+        env:
+          TOOLCHAIN_CHANGE: ${{ steps.toolchain.outputs.change }}
+        run: |
+          if git diff --quiet; then
+            echo "toolchain and tools are current"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          {
+            echo 'summary<<EOF'
+            if [ -n "$TOOLCHAIN_CHANGE" ]; then echo "- $TOOLCHAIN_CHANGE"; fi
+            { git diff -U0 tools.mod | grep -v '// indirect' | grep -E '^[-+]\s+\S+ v' || true; } | sed -E 's/^([-+])\s+(\S+) (\S+).*/\2 \1\3/' |
+              awk '{ if ($2 ~ /^-/) old[$1]=substr($2,2); else new[$1]=substr($2,2) }
+                   END { for (m in new) if (m in old) printf "- %s %s -> %s\n", m, old[m], new[m]; else printf "- %s %s\n", m, new[m] }' | sort
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check with the new tools
+        id: check
+        if: steps.diff.outputs.changed == 'true'
+        run: eval "$CHECK"
+
+      - name: Commit to main
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          SUMMARY: ${{ steps.diff.outputs.summary }}
+        run: |
+          git commit -am "build(tools): upgrade the toolchain and development tools" -m "$SUMMARY"
+          git pull --rebase origin main
+          git push origin HEAD:main
+          existing=$(gh issue list --state open --search "in:title \"$ISSUE_TITLE\"" --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue close "$existing" --comment "Upgraded in $(git rev-parse --short HEAD)."
+          fi
+
+      - name: Keep the attempt and open an issue
+        if: failure() && steps.check.outcome == 'failure'
+        env:
+          SUMMARY: ${{ steps.diff.outputs.summary }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          git switch -c tools-upgrade
+          git commit -am "build(tools): upgrade the toolchain and development tools" -m "$SUMMARY"
+          git push --force origin tools-upgrade
+          body=$(printf '`%s` failed with these upgrades:\n\n%s\n\nThe run: %s\n\nThe upgrade is on the `tools-upgrade` branch. Fix what the new tools report there (or on main), then rerun the Tools upgrade workflow.\n' "$CHECK" "$SUMMARY" "$RUN_URL")
+          existing=$(gh issue list --state open --search "in:title \"$ISSUE_TITLE\"" --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$ISSUE_TITLE" --body "$body"
+          fi

@@ -1,0 +1,196 @@
+# CI for a go-rotini module. The calling repository lists its jobs; each runs one script on
+# each OS (and Go release) it names. Pull requests also get dependency review and a
+# conventional-commit check. The last job, ok, passes only when every other job passed or was
+# skipped, so it is the one check to require or wait on.
+#
+#   jobs:
+#     ci:
+#       uses: go-rotini/.github/.github/workflows/go-ci.yml@main
+#       with:
+#         jobs: |
+#           - name: test
+#             run: make test
+#             os: [ubuntu-latest, macos-latest, windows-latest]
+#             artifact: test.out
+#           - name: lint
+#             run: make lint
+#
+# A job's keys:
+#   name      the job's name (required)
+#   run       the bash script it runs (required)
+#   os        runners, default ["ubuntu-latest"]
+#   go        Go releases for setup-go, such as ["stable"]; "" or unset is the workflow's Go
+#   go-file   a go.mod-style file to read the Go release from, instead of the workflow's
+#   lf        check out with LF line endings on every OS (golden files that compare bytes)
+#   artifact  a file or directory to upload, from the job's first OS and Go release only
+#   timeout   minutes, default 60
+name: Go CI
+
+on:
+  workflow_call:
+    inputs:
+      jobs:
+        description: The jobs to run, as a YAML (or JSON) list (see the top of this file).
+        type: string
+        required: true
+      go-version:
+        description: The Go release for setup-go, such as 1.27.x. Empty reads go-version-file.
+        type: string
+        default: ""
+      go-version-file:
+        description: The file setup-go reads the Go release from when go-version is empty; a go.mod's toolchain line wins over its go line.
+        type: string
+        default: go.mod
+      cache-dependency-path:
+        description: The files whose contents key the Go module and build cache.
+        type: string
+        default: |
+          go.sum
+          tools.sum
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - name: Expand each job across its OSes and Go releases
+        id: plan
+        env:
+          JOBS: ${{ inputs.jobs }}
+        run: |
+          matrix=$(printf '%s' "$JOBS" | yq -o=json -I=0 '.' | jq -c '
+            [ .[] as $j
+              | ($j.os // ["ubuntu-latest"]) as $oses
+              | ($j.go // [""]) as $gos
+              | $oses[] as $os | $gos[] as $go
+              | { label: ([$j.name]
+                    + (if ($oses | length) > 1 then [$os] else [] end)
+                    + (if ($gos | length) > 1 then [if $go == "" then "go.mod" else $go end] else [] end)
+                    | if length == 1 then .[0] else "\(.[0]) (\(.[1:] | join(", ")))" end),
+                  name: $j.name, run: $j.run, os: $os, go: $go,
+                  "go-file": ($j["go-file"] // ""),
+                  lf: ($j.lf // false),
+                  artifact: (if $os == $oses[0] and $go == $gos[0] then ($j.artifact // "") else "" end),
+                  timeout: ($j.timeout // 60) } ]')
+          if [ "$(printf '%s' "$matrix" | jq length)" -eq 0 ]; then
+            echo "::error::no jobs given"
+            exit 1
+          fi
+          echo "matrix={\"include\":$matrix}" >> "$GITHUB_OUTPUT"
+
+  run:
+    needs: plan
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ matrix.timeout }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Keep the checkout byte-identical to Linux: golden files and fixtures compare bytes.
+      - name: Check out with LF line endings
+        if: matrix.lf
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Choose the Go release
+        id: go
+        env:
+          JOB_GO: ${{ matrix.go }}
+          JOB_GO_FILE: ${{ matrix.go-file }}
+          GO_VERSION: ${{ inputs.go-version }}
+          GO_VERSION_FILE: ${{ inputs.go-version-file }}
+        run: |
+          if [ -n "$JOB_GO" ]; then
+            echo "version=$JOB_GO" >> "$GITHUB_OUTPUT"
+          elif [ -n "$JOB_GO_FILE" ]; then
+            echo "file=$JOB_GO_FILE" >> "$GITHUB_OUTPUT"
+          elif [ -n "$GO_VERSION" ]; then
+            echo "version=$GO_VERSION" >> "$GITHUB_OUTPUT"
+          else
+            echo "file=$GO_VERSION_FILE" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ steps.go.outputs.version }}
+          go-version-file: ${{ steps.go.outputs.file }}
+          check-latest: ${{ steps.go.outputs.version != '' }}
+          cache-dependency-path: ${{ inputs.cache-dependency-path }}
+
+      - name: ${{ matrix.name }}
+        env:
+          JOB_RUN: ${{ matrix.run }}
+        run: eval "$JOB_RUN"
+
+      - name: Upload ${{ matrix.artifact }}
+        if: matrix.artifact != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.artifact }}
+
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+
+  commitlint:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # A squash merge makes the pull request's title the commit semantic-release reads, so the
+      # title is checked too. Merge commits (main merged into the branch) are skipped.
+      - name: Check conventional commits
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          PATTERN='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?(!)?: .+'
+          FAILED=0
+          if ! printf '%s\n' "$TITLE" | grep -qE "$PATTERN"; then
+            echo "BAD pull request title: $TITLE"
+            FAILED=1
+          fi
+          for SHA in $(git rev-list --no-merges "$BASE".."$HEAD"); do
+            MSG=$(git log --format=%s -n1 "$SHA")
+            if ! echo "$MSG" | grep -qE "$PATTERN"; then
+              echo "BAD: $MSG"
+              FAILED=1
+            fi
+          done
+          if [ "$FAILED" -eq 1 ]; then
+            echo "::error::The pull request title or some commits do not follow Conventional Commits (https://www.conventionalcommits.org)"
+            exit 1
+          fi
+
+  ok:
+    needs: [plan, run, dependency-review, commitlint]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every job passed
+        env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          echo "$RESULTS"
+          if printf '%s' "$RESULTS" | jq -e 'any(. == "failure" or . == "cancelled")' > /dev/null; then
+            echo "::error::a CI job failed or was cancelled"
+            exit 1
+          fi

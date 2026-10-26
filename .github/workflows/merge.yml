@@ -1,0 +1,18 @@
+name: Dependabot merge
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  merge:
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/dependabot-merge.yml
+    secrets: inherit
+    with:
+      groups: actions

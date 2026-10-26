@@ -154,6 +154,7 @@ jobs:
           git switch -c tools-upgrade
           git commit -am "build(tools): upgrade the toolchain and development tools" -m "$SUMMARY"
           git push --force origin tools-upgrade
+          # shellcheck disable=SC2016 # the backticks are Markdown, not command substitution
           body=$(printf '`%s` failed with these upgrades:\n\n%s\n\nThe run: %s\n\nThe upgrade is on the `tools-upgrade` branch. Fix what the new tools report there (or on main), then rerun the Tools upgrade workflow.\n' "$CHECK" "$SUMMARY" "$RUN_URL")
           existing=$(gh issue list --state open --search "in:title \"$ISSUE_TITLE\"" --json number --jq '.[0].number // empty')
           if [ -n "$existing" ]; then

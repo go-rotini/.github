@@ -1,0 +1,132 @@
+# Releases a go-rotini module from its conventional commits: semantic-release picks the next
+# version, and the tag is published as a GitHub release with an attested SBOM. The caller runs
+# it from a completed CI run on main:
+#
+#   on:
+#     workflow_run:
+#       workflows: [CI]
+#       types: [completed]
+#       branches: [main]
+#
+# A CI run on main counts whether a push started it or a manual workflow_dispatch did.
+name: Go release
+
+on:
+  workflow_call:
+    inputs:
+      majors:
+        description: The major versions the module path can carry, space separated; a release outside them is refused.
+        type: string
+        default: "1"
+      initial-development:
+        description: Release below v1 (v0.x) until v1.0.0 is tagged by hand.
+        type: boolean
+        default: false
+      go-version:
+        description: The Go release for setup-go, such as 1.27.x. Empty reads go-version-file.
+        type: string
+        default: ""
+      go-version-file:
+        description: The file setup-go reads the Go release from when go-version is empty.
+        type: string
+        default: go.mod
+    outputs:
+      version:
+        description: The version released, without the v; empty when nothing was released.
+        value: ${{ jobs.release.outputs.version }}
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.semrel.outputs.version }}
+    env:
+      TESTED_SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      # Release exactly the commit CI tested.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      # When main has moved past the tested commit, the newer commit's own CI run releases it.
+      - name: Check the tested commit is still the tip of main
+        id: tip
+        run: |
+          tip=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ "$tip" = "$TESTED_SHA" ]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::main is at $tip, past the tested commit $TESTED_SHA; its own CI run releases it"
+            echo "current=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: steps.tip.outputs.current == 'true'
+        with:
+          go-version: ${{ inputs.go-version }}
+          go-version-file: ${{ inputs.go-version == '' && inputs.go-version-file || '' }}
+          check-latest: ${{ inputs.go-version != '' }}
+          cache: false
+
+      - name: Determine version
+        if: steps.tip.outputs.current == 'true'
+        uses: go-semantic-release/action@2e9dc4247a6004f8377781bef4cb9dad273a741f # v1.24.1
+        id: semrel
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          dry: true
+          allow-initial-development-versions: ${{ inputs.initial-development }}
+
+      # A BREAKING CHANGE commit makes semantic-release propose the next major. A v2+ tag is
+      # uninstallable while the module path has no /v2 suffix: `go get @latest` ignores it and
+      # `@v2.0.0` is rejected. Refuse the release rather than publish a tag no user can fetch.
+      - name: Refuse a major version the module path cannot carry
+        if: steps.semrel.outputs.version != ''
+        env:
+          VERSION: ${{ steps.semrel.outputs.version }}
+          MAJORS: ${{ inputs.majors }}
+        run: |
+          major=${VERSION%%.*}
+          for m in $MAJORS; do
+            [ "$m" = "$major" ] && exit 0
+          done
+          module=$(awk '/^module /{print $2}' go.mod)
+          echo "::error::semantic-release proposed v${VERSION}, but $module can only publish v{${MAJORS// /,}}.x; a new major needs the module path changed first"
+          exit 1
+
+      - name: Generate SBOM
+        if: steps.semrel.outputs.version != ''
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: Attest SBOM provenance
+        if: steps.semrel.outputs.version != ''
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: sbom.spdx.json
+
+      - name: Create draft release
+        if: steps.semrel.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.semrel.outputs.version }}
+        run: gh release create "v$VERSION" --target "$TESTED_SHA" --draft --generate-notes sbom.spdx.json
+
+      - name: Publish release
+        if: steps.semrel.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.semrel.outputs.version }}
+        run: gh release edit "v$VERSION" --draft=false

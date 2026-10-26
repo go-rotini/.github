@@ -1,0 +1,16 @@
+# The shared workflows pin each action to a commit. Minor and patch releases arrive as one
+# grouped pull request a week and merge themselves once actionlint passes (merge.yml); a major
+# release gets its own pull request, for review.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      actions:
+        patterns: ["*"]
+        update-types: [minor, patch]

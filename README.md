@@ -17,7 +17,6 @@ Callers use them at `@main`, from `go-rotini/.github/.github/workflows/<file>`.
 | `go-fuzz-nightly.yml` | Each fuzz target for ten minutes. | `fuzz-nightly.yml`, nightly |
 | `go-tools-upgrade.yml` | Moves go.mod's toolchain line to its newest patch release and runs `make tools-upgrade`; commits to main when `make lint` passes, else opens an issue. | `tools-upgrade.yml`, weekly |
 | `auto-merge.yml` | Merges a pull request once CI passes on it, when it is a grouped minor or patch Dependabot update or a go-rotini owner enabled auto-merge on it. | `auto-merge.yml`, when CI completes and when auto-merge is enabled |
-| `dependabot-merge.yml` | The Dependabot half of `auto-merge.yml`, kept until every repository calls that instead. | |
 
 Each file's header lists its inputs. Go comes from the caller's go.mod (its toolchain line)
 unless `go-version` is given.
